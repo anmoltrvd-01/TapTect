@@ -16,17 +16,27 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.taptect.audio.AudioRecorderManager
+import com.example.taptect.audio.FFTProcessor
+import com.example.taptect.sensor.TapSensorManager
+import kotlinx.coroutines.launch
 
 /**
  * Main UI Screen for TapTect.
  */
 @Composable
 fun MainScreen() {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val audioRecorderManager = remember { AudioRecorderManager() }
+    val tapSensorManager = remember { TapSensorManager(context) }
+    val fftProcessor = remember { FFTProcessor() }
+
     val audioData by audioRecorderManager.audioDataFlow.collectAsState(initial = ShortArray(0))
+    var analysisResult by remember { mutableStateOf<FFTProcessor.AnalysisResult?>(null) }
     var hasPermissions by remember { mutableStateOf(value = false) }
 
     TapTectPermissionsHandler {
@@ -36,8 +46,16 @@ fun MainScreen() {
     if (hasPermissions) {
         DisposableEffect(Unit) {
             audioRecorderManager.startRecording(scope)
+            tapSensorManager.startListening { magnitude ->
+                // Impact detected! Capture 256ms of audio and process
+                scope.launch {
+                    val buffer = audioRecorderManager.captureBuffer(256)
+                    analysisResult = fftProcessor.analyze(buffer, 44100)
+                }
+            }
             onDispose {
                 audioRecorderManager.stopRecording()
+                tapSensorManager.stopListening()
             }
         }
 
@@ -47,16 +65,39 @@ fun MainScreen() {
                 .padding(16.dp)
         ) {
             Text(
-                text = "Audio Visualizer",
+                text = "TapTect Analysis",
                 style = MaterialTheme.typography.headlineMedium
             )
             
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(16.dp))
             
+            Text(text = "Real-time Waveform", style = MaterialTheme.typography.titleSmall)
             WaveformVisualizer(
                 audioData = audioData,
-                color = MaterialTheme.colorScheme.primary
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.height(100.dp)
             )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            analysisResult?.let { result ->
+                Text(text = "Last Tap Analysis", style = MaterialTheme.typography.titleMedium)
+                Text(text = "Peak Frequency: ${result.peakFrequency.toInt()} Hz")
+                Text(text = "Energy Decay: ${"%.2f".format(result.energyDecay)}")
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                FrequencySpectrumVisualizer(
+                    magnitudes = result.magnitudes,
+                    modifier = Modifier.height(120.dp)
+                )
+            } ?: run {
+                Text(
+                    text = "Tap a surface to see frequency analysis",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.Gray
+                )
+            }
         }
     } else {
         Text(
