@@ -18,6 +18,10 @@ import com.example.taptect.audio.*
 import com.example.taptect.data.CalibrationRepository
 import com.example.taptect.data.SurfaceResult
 import com.example.taptect.sensor.TapSensorManager
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -34,6 +38,7 @@ fun MainScreen() {
     val noiseFilter = remember { NoiseFilter() }
     val repository = remember { CalibrationRepository() }
     val calibrator = remember { AmbientNoiseCalibrator(audioRecorderManager) }
+    val hapticFeedback = remember { HapticFeedback(context) }
 
     val audioData by audioRecorderManager.audioDataFlow.collectAsState(initial = ShortArray(0))
     var analysisResult by remember { mutableStateOf<FFTProcessor.AnalysisResult?>(null) }
@@ -67,7 +72,8 @@ fun MainScreen() {
     ) {
         Column(
             modifier = Modifier.fillMaxSize().padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             HeaderSection()
 
@@ -82,13 +88,16 @@ fun MainScreen() {
                             
                             // DUAL TRIGGER: Accelerometer magnitude AND Audio amplitude
                             if (rms > audioThreshold) {
+                                hapticFeedback.triggerClick()
                                 isProcessing = true
                                 val result = withContext(Dispatchers.Default) {
                                     val filtered = noiseFilter.process(buffer)
                                     fftProcessor.analyze(filtered, 44100)
                                 }
                                 analysisResult = result
-                                surfaceResult = repository.classifyTap(result.peakFrequency, result.energyDecay)
+                                val finalResult = repository.classifyTap(result.peakFrequency, result.energyDecay)
+                                surfaceResult = finalResult
+                                hapticFeedback.triggerSuccess()
                                 isProcessing = false
                             }
                         }
@@ -99,34 +108,48 @@ fun MainScreen() {
                     }
                 }
 
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    RadarTarget(isImpacted = isProcessing)
+                    
+                    if (!isProcessing && surfaceResult == null) {
+                        Text(
+                            "READY FOR SCAN",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(top = 220.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(24.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("LIVE ACOUSTICS", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Text("ACOUSTIC SIGNATURE", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(12.dp))
                         WaveformVisualizer(
                             audioData = audioData,
                             color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.height(80.dp).fillMaxWidth()
+                            modifier = Modifier.height(60.dp).fillMaxWidth()
                         )
                     }
                 }
 
                 surfaceResult?.let { result ->
                     MaterialResultCard(result, isProcessing)
-                } ?: run {
-                    Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                        Text("Tap a surface to analyze", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.outline)
-                    }
                 }
 
                 analysisResult?.let { result ->
                     FrequencySpectrumVisualizer(
                         magnitudes = result.magnitudes,
-                        modifier = Modifier.height(100.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
+                        modifier = Modifier.height(80.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
                     )
                 }
             }
@@ -162,26 +185,73 @@ fun HeaderSection() {
 
 @Composable
 fun MaterialResultCard(result: SurfaceResult, isScanning: Boolean) {
+    val densityProgress by animateFloatAsState(
+        targetValue = result.material.densityScore / 100f,
+        animationSpec = tween(1000, easing = FastOutSlowInEasing),
+        label = "DensityProgress"
+    )
+
+    val densityColor by animateColorAsState(
+        targetValue = when {
+            result.material.densityScore < 40 -> Color(0xFFFF9800) // Orange (Hollow)
+            result.material.densityScore < 70 -> Color(0xFF00BCD4) // Cyan (Medium)
+            else -> Color(0xFF3F51B5) // Deep Blue (High)
+        },
+        animationSpec = tween(1000),
+        label = "DensityColor"
+    )
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
     ) {
         Column(modifier = Modifier.padding(24.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(if (isScanning) "ANALYZING..." else "DETECTED MATERIAL", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
-                    Text(result.material.materialName, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Text(
+                        if (isScanning) "ANALYZING..." else "MATERIAL IDENTIFIED",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                    )
+                    Text(
+                        result.material.materialName,
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
                 }
                 Badge(containerColor = if (result.isHollow) Color(0xFFFFB4AB) else Color(0xFFB4E6FF)) {
-                    Text(if (result.isHollow) "HOLLOW" else "SOLID", modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (result.isHollow) "HOLLOW" else "SOLID",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
+            
             Spacer(modifier = Modifier.height(24.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                ResultMetric("Density", "${result.material.densityScore}%")
+            
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("DENSITY METER", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f))
+                    Text("${result.material.densityScore}%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                }
+                LinearProgressIndicator(
+                    progress = { densityProgress },
+                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                    color = densityColor,
+                    trackColor = densityColor.copy(alpha = 0.2f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                 ResultMetric("Confidence", "${(result.confidence * 100).toInt()}%")
+                ResultMetric("Frequency", "${result.material.targetFrequencyRange.first}Hz+")
             }
         }
     }
