@@ -5,11 +5,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import kotlin.math.log10
 
 @Composable
 fun FrequencySpectrumVisualizer(
@@ -27,22 +27,21 @@ fun FrequencySpectrumVisualizer(
         
         if (magnitudes.isEmpty()) return@Canvas
 
-        // We only show up to ~10kHz for better visibility (index depends on N and sampleRate)
-        // For a typical N=8192, 10kHz is around index 1800.
-        // Let's just show the first half of the magnitudes array (up to Nyquist)
-        val displayCount = magnitudes.size / 2 
+        // Only show the audible range
+        val displayCount = (magnitudes.size / 4).coerceAtLeast(10)
         val barWidth = width / displayCount
+        val spacing = 2.dp.toPx()
 
         for (i in 0 until displayCount) {
-            // Use log scale for magnitude visibility
             val magnitude = magnitudes[i]
-            val normalizedMag = (20 * log10(magnitude.coerceAtLeast(1f)) / 100f).coerceIn(0f, 1f)
+            val normalizedMag = (magnitude / 1000f).coerceIn(0.01f, 1f)
             val barHeight = normalizedMag * height
 
-            drawRect(
+            drawRoundRect(
                 color = color,
-                topLeft = Offset(i * barWidth, height - barHeight),
-                size = Size(barWidth.coerceAtLeast(1f), barHeight)
+                topLeft = Offset(i * barWidth + spacing / 2, height - barHeight),
+                size = Size((barWidth - spacing).coerceAtLeast(1f), barHeight),
+                cornerRadius = CornerRadius(4.dp.toPx())
             )
         }
     }

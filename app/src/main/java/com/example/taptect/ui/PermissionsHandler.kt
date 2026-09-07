@@ -21,10 +21,10 @@ fun TapTectPermissionsHandler(
         )
     )
 
-    if (permissionState.allPermissionsGranted) {
-        onPermissionsGranted()
-    } else {
-        LaunchedEffect(permissionState) {
+    LaunchedEffect(permissionState.allPermissionsGranted) {
+        if (permissionState.allPermissionsGranted) {
+            onPermissionsGranted()
+        } else {
             permissionState.launchMultiplePermissionRequest()
         }
     }
