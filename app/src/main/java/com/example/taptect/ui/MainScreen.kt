@@ -1,10 +1,15 @@
 package com.example.taptect.ui
 
 import android.util.Log
-import androidx.compose.animation.*
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -14,21 +19,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.taptect.audio.*
 import com.example.taptect.data.CalibrationRepository
 import com.example.taptect.data.SurfaceResult
+import com.example.taptect.data.TapRecord
 import com.example.taptect.sensor.TapSensorManager
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.sqrt
 
 @Composable
-fun MainScreen() {
+fun MainScreen(
+    historyViewModel: HistoryViewModel = viewModel()
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
@@ -48,6 +53,12 @@ fun MainScreen() {
     var isCalibrating by remember { mutableStateOf(false) }
     var audioThreshold by remember { mutableStateOf(800f) }
     var isProcessing by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
+
+    if (showHistory) {
+        HistoryScreen(onBack = { showHistory = false })
+        return
+    }
 
     TapTectPermissionsHandler {
         hasPermissions = true
@@ -75,7 +86,7 @@ fun MainScreen() {
             verticalArrangement = Arrangement.spacedBy(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            HeaderSection()
+            HeaderSection(onHistoryClick = { showHistory = true })
 
             if (isCalibrating) {
                 CalibrationLoadingView()
@@ -97,6 +108,18 @@ fun MainScreen() {
                                 analysisResult = result
                                 val finalResult = repository.classifyTap(result.peakFrequency, result.energyDecay)
                                 surfaceResult = finalResult
+                                
+                                // Save to database
+                                historyViewModel.insert(
+                                    TapRecord(
+                                        timestamp = System.currentTimeMillis(),
+                                        materialType = finalResult.material.materialName,
+                                        peakFrequency = result.peakFrequency,
+                                        decayRate = result.energyDecay,
+                                        densityScore = finalResult.material.densityScore
+                                    )
+                                )
+
                                 hapticFeedback.triggerSuccess()
                                 isProcessing = false
                             }
@@ -176,10 +199,19 @@ private fun calculateRMS(data: ShortArray): Float {
 }
 
 @Composable
-fun HeaderSection() {
-    Column {
-        Text("TapTect", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
-        Text("Material Intelligence Engine", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.secondary)
+fun HeaderSection(onHistoryClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text("TapTect", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+            Text("Material Intelligence Engine", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.secondary)
+        }
+        IconButton(onClick = onHistoryClick) {
+            Icon(Icons.Default.History, contentDescription = "History")
+        }
     }
 }
 
