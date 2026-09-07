@@ -1,9 +1,7 @@
 package com.example.taptect.ui
 
 import android.util.Log
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.expandVertically
+import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -16,32 +14,51 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.taptect.audio.AudioRecorderManager
-import com.example.taptect.audio.FFTProcessor
+import com.example.taptect.audio.*
 import com.example.taptect.data.CalibrationRepository
 import com.example.taptect.data.SurfaceResult
 import com.example.taptect.sensor.TapSensorManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.sqrt
 
 @Composable
 fun MainScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    
     val audioRecorderManager = remember { AudioRecorderManager() }
     val tapSensorManager = remember { TapSensorManager(context) }
     val fftProcessor = remember { FFTProcessor() }
+    val noiseFilter = remember { NoiseFilter() }
     val repository = remember { CalibrationRepository() }
+    val calibrator = remember { AmbientNoiseCalibrator(audioRecorderManager) }
 
     val audioData by audioRecorderManager.audioDataFlow.collectAsState(initial = ShortArray(0))
     var analysisResult by remember { mutableStateOf<FFTProcessor.AnalysisResult?>(null) }
     var surfaceResult by remember { mutableStateOf<SurfaceResult?>(null) }
+    
     var hasPermissions by remember { mutableStateOf(false) }
+    var isCalibrating by remember { mutableStateOf(false) }
+    var audioThreshold by remember { mutableStateOf(800f) }
     var isProcessing by remember { mutableStateOf(false) }
 
     TapTectPermissionsHandler {
         hasPermissions = true
+    }
+
+    // Auto-calibration on launch
+    LaunchedEffect(hasPermissions) {
+        if (hasPermissions) {
+            isCalibrating = true
+            audioRecorderManager.startRecording(this)
+            calibrator.startCalibration(this) { threshold ->
+                audioThreshold = threshold
+                isCalibrating = false
+                Log.d("TapTect", "Calibration complete. Audio threshold: $threshold")
+            }
+        }
     }
 
     Surface(
@@ -49,28 +66,26 @@ fun MainScreen() {
         color = MaterialTheme.colorScheme.background
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp),
+            modifier = Modifier.fillMaxSize().padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             HeaderSection()
 
-            if (hasPermissions) {
+            if (isCalibrating) {
+                CalibrationLoadingView()
+            } else if (hasPermissions) {
                 DisposableEffect(Unit) {
-                    var lastImpactTime = 0L
-                    audioRecorderManager.startRecording(scope)
                     tapSensorManager.startListening { magnitude ->
-                        val now = System.currentTimeMillis()
-                        // Debounce: Only process one tap every 500ms
-                        if (now - lastImpactTime > 500) {
-                            lastImpactTime = now
-                            scope.launch {
+                        scope.launch {
+                            val buffer = audioRecorderManager.captureBuffer(256)
+                            val rms = calculateRMS(buffer)
+                            
+                            // DUAL TRIGGER: Accelerometer magnitude AND Audio amplitude
+                            if (rms > audioThreshold) {
                                 isProcessing = true
-                                val buffer = audioRecorderManager.captureBuffer(256)
-                                // OFF-LOAD HEAVY CALCULATION TO BACKGROUND
                                 val result = withContext(Dispatchers.Default) {
-                                    fftProcessor.analyze(buffer, 44100)
+                                    val filtered = noiseFilter.process(buffer)
+                                    fftProcessor.analyze(filtered, 44100)
                                 }
                                 analysisResult = result
                                 surfaceResult = repository.classifyTap(result.peakFrequency, result.energyDecay)
@@ -84,20 +99,13 @@ fun MainScreen() {
                     }
                 }
 
-                // Waveform Dashboard
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(24.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    )
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "LIVE ACOUSTICS",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text("LIVE ACOUSTICS", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(12.dp))
                         WaveformVisualizer(
                             audioData = audioData,
@@ -107,36 +115,19 @@ fun MainScreen() {
                     }
                 }
 
-                // Result Dashboard
                 surfaceResult?.let { result ->
                     MaterialResultCard(result, isProcessing)
                 } ?: run {
-                    Box(
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Tap a surface to calibrate",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.outline
-                        )
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        Text("Tap a surface to analyze", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.outline)
                     }
                 }
 
-                // Spectrum at the bottom
                 analysisResult?.let { result ->
                     FrequencySpectrumVisualizer(
                         magnitudes = result.magnitudes,
-                        modifier = Modifier
-                            .height(100.dp)
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.surface)
+                        modifier = Modifier.height(100.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
                     )
-                }
-            } else {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Requesting microphone access...")
                 }
             }
         }
@@ -144,19 +135,28 @@ fun MainScreen() {
 }
 
 @Composable
+fun CalibrationLoadingView() {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator()
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Calibrating ambient noise floor...", style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+private fun calculateRMS(data: ShortArray): Float {
+    if (data.isEmpty()) return 0f
+    var sum = 0.0
+    for (s in data) sum += (s.toInt() * s.toInt()).toDouble()
+    return sqrt(sum / data.size).toFloat()
+}
+
+@Composable
 fun HeaderSection() {
     Column {
-        Text(
-            text = "TapTect",
-            style = MaterialTheme.typography.headlineLarge,
-            fontWeight = FontWeight.ExtraBold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Text(
-            text = "Material Intelligence Engine",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.secondary
-        )
+        Text("TapTect", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+        Text("Material Intelligence Engine", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.secondary)
     }
 }
 
@@ -165,40 +165,20 @@ fun MaterialResultCard(result: SurfaceResult, isScanning: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
-        ),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
     ) {
         Column(modifier = Modifier.padding(24.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = if (isScanning) "ANALYZING..." else "DETECTED MATERIAL",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                    )
-                    Text(
-                        text = result.material.materialName,
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
+                    Text(if (isScanning) "ANALYZING..." else "DETECTED MATERIAL", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                    Text(result.material.materialName, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
-                Badge(
-                    containerColor = if (result.isHollow) Color(0xFFFFB4AB) else Color(0xFFB4E6FF)
-                ) {
-                    Text(
-                        text = if (result.isHollow) "HOLLOW" else "SOLID",
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold
-                    )
+                Badge(containerColor = if (result.isHollow) Color(0xFFFFB4AB) else Color(0xFFB4E6FF)) {
+                    Text(if (result.isHollow) "HOLLOW" else "SOLID", modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                 }
             }
-            
             Spacer(modifier = Modifier.height(24.dp))
-            
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 ResultMetric("Density", "${result.material.densityScore}%")
                 ResultMetric("Confidence", "${(result.confidence * 100).toInt()}%")
@@ -210,16 +190,7 @@ fun MaterialResultCard(result: SurfaceResult, isScanning: Boolean) {
 @Composable
 fun ResultMetric(label: String, value: String) {
     Column {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onPrimaryContainer
-        )
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f))
+        Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
     }
 }

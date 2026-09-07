@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlin.math.sqrt
 
 /**
- * Wrapper class for Android SensorManager to listen to high-frequency accelerometer events.
+ * Enhanced SensorManager with dual-trigger logic and cooldown periods.
  */
 class TapSensorManager(context: Context) : SensorEventListener {
 
@@ -19,6 +19,10 @@ class TapSensorManager(context: Context) : SensorEventListener {
     private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
     private var onImpactDetected: ((Float) -> Unit)? = null
+    
+    private var lastTriggerTime = 0L
+    private val cooldownMs = 300L
+    private var gForceThreshold = 18f // Adjustable threshold
 
     fun startListening(onImpact: (Float) -> Unit) {
         onImpactDetected = onImpact
@@ -34,28 +38,24 @@ class TapSensorManager(context: Context) : SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent?) {
         if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
+            val now = System.currentTimeMillis()
+            if (now - lastTriggerTime < cooldownMs) return
+
+            val z = event.values[2] // Focus on Z-axis for physical impacts
             val x = event.values[0]
             val y = event.values[1]
-            val z = event.values[2]
-
-            // Calculate magnitude of acceleration
             val magnitude = sqrt(x * x + y * y + z * z)
-            
-            // Simple logic to detect sudden physical impact (threshold can be tuned)
-            // Gravity is ~9.8 m/s^2, so we look for values significantly higher
-            if (magnitude > 15f) {
+
+            // Sharp Z-axis movement often indicates a surface tap
+            if (magnitude > gForceThreshold) {
+                lastTriggerTime = now
                 onImpactDetected?.invoke(magnitude)
             }
         }
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // Not needed for simple impact detection
-    }
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    /**
-     * Provides a Flow of accelerometer magnitude for Compose/Coroutines usage.
-     */
     fun getAccelerometerFlow(): Flow<Float> = callbackFlow {
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent?) {
@@ -68,13 +68,7 @@ class TapSensorManager(context: Context) : SensorEventListener {
             }
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
-
-        accelerometer?.let {
-            sensorManager.registerListener(listener, it, SensorManager.SENSOR_DELAY_FASTEST)
-        }
-
-        awaitClose {
-            sensorManager.unregisterListener(listener)
-        }
+        accelerometer?.let { sensorManager.registerListener(listener, it, SensorManager.SENSOR_DELAY_FASTEST) }
+        awaitClose { sensorManager.unregisterListener(listener) }
     }
 }
