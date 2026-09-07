@@ -4,16 +4,18 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Manages audio recording and emits raw PCM data.
+ * Manages audio recording and emits raw PCM data with throttling to prevent UI saturation.
  */
 class AudioRecorderManager {
 
@@ -35,39 +37,71 @@ class AudioRecorderManager {
     fun startRecording(scope: CoroutineScope) {
         if (recordingJob != null) return
 
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            channelConfig,
-            audioFormat,
-            bufferSize
-        )
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                channelConfig,
+                audioFormat,
+                bufferSize
+            )
 
-        audioRecord?.startRecording()
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e("TapTect", "AudioRecord failed to initialize")
+                return
+            }
 
-        recordingJob = scope.launch(Dispatchers.IO) {
-            val readBuffer = ShortArray(bufferSize / 2)
-            while (isActive && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                val readSize = audioRecord?.read(readBuffer, 0, readBuffer.size) ?: 0
-                if (readSize > 0) {
-                    val actualData = readBuffer.copyOf(readSize)
-                    
-                    // Update circular buffer
-                    for (s in actualData) {
-                        circularBuffer[writePos] = s
-                        writePos = (writePos + 1) % circularBufferSize
+            audioRecord?.startRecording()
+            Log.d("TapTect", "Audio recording started")
+
+            recordingJob = scope.launch(Dispatchers.IO) {
+                val readBuffer = ShortArray(bufferSize / 2)
+                val emissionBuffer = mutableListOf<Short>()
+                var lastEmitTime = System.currentTimeMillis()
+
+                while (isActive && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    val readSize = audioRecord?.read(readBuffer, 0, readBuffer.size) ?: 0
+                    if (readSize > 0) {
+                        // Update circular buffer
+                        for (i in 0 until readSize) {
+                            val sample = readBuffer[i]
+                            circularBuffer[writePos] = sample
+                            writePos = (writePos + 1) % circularBufferSize
+                            emissionBuffer.add(sample)
+                        }
+
+                        // Throttle emissions to ~20Hz (every 50ms) to save UI thread
+                        val currentTime = System.currentTimeMillis()
+                        if (currentTime - lastEmitTime >= 50 && emissionBuffer.isNotEmpty()) {
+                            _audioDataFlow.emit(emissionBuffer.toShortArray())
+                            emissionBuffer.clear()
+                            lastEmitTime = currentTime
+                        }
                     }
-                    
-                    _audioDataFlow.emit(actualData)
                 }
             }
+        } catch (e: Exception) {
+            Log.e("TapTect", "Error starting audio recording", e)
         }
     }
 
-    /**
-     * Captures a specific duration of audio from the circular buffer.
-     * @param durationMs Duration in milliseconds.
-     */
+    fun stopRecording() {
+        Log.d("TapTect", "Stopping audio recording")
+        recordingJob?.cancel()
+        recordingJob = null
+        try {
+            audioRecord?.apply {
+                if (recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    stop()
+                }
+                release()
+            }
+        } catch (e: Exception) {
+            Log.e("TapTect", "Error stopping audio recording", e)
+        }
+        audioRecord = null
+    }
+
     fun captureBuffer(durationMs: Int): ShortArray {
         val size = (sampleRate * durationMs / 1000).coerceAtMost(circularBufferSize)
         val result = ShortArray(size)
@@ -77,17 +111,5 @@ class AudioRecorderManager {
             readPos = (readPos + 1) % circularBufferSize
         }
         return result
-    }
-
-    fun stopRecording() {
-        recordingJob?.cancel()
-        recordingJob = null
-        audioRecord?.apply {
-            if (recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                stop()
-            }
-            release()
-        }
-        audioRecord = null
     }
 }

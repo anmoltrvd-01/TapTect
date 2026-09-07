@@ -3,10 +3,7 @@ package com.example.taptect.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -22,20 +19,25 @@ fun WaveformVisualizer(
     color: Color = Color(0xFF6200EE)
 ) {
     val maxAmplitude = 32767f
-    val rms = if (audioData.isNotEmpty()) {
-        val sum = audioData.fold(0.0) { acc, s -> acc + (s.toInt() * s.toInt()) }
-        kotlin.math.sqrt(sum / audioData.size).toFloat()
-    } else 0f
+    
+    // Calculate RMS only when audioData changes
+    val rms = remember(audioData) {
+        if (audioData.isNotEmpty()) {
+            var sum = 0.0
+            for (s in audioData) {
+                sum += (s.toInt() * s.toInt()).toDouble()
+            }
+            kotlin.math.sqrt(sum / audioData.size).toFloat()
+        } else 0f
+    }
 
     val animatedIntensity by animateFloatAsState(
-        targetValue = (rms / maxAmplitude).coerceIn(0.05f, 1f),
+        targetValue = (rms / maxAmplitude).coerceIn(0.01f, 1f),
         animationSpec = tween(durationMillis = 100),
         label = "WaveformIntensity"
     )
 
-    Canvas(
-        modifier = modifier
-    ) {
+    Canvas(modifier = modifier) {
         val width = size.width
         val height = size.height
         val centerY = height / 2f
@@ -45,30 +47,33 @@ fun WaveformVisualizer(
 
         if (audioData.isNotEmpty()) {
             val step = (audioData.size / 60).coerceAtLeast(1)
-            val points = mutableListOf<Pair<Float, Float>>()
+            val pointsX = FloatArray(60)
+            val pointsY = FloatArray(60)
+            var count = 0
             
             for (i in 0 until audioData.size step step) {
-                val x = (i.toFloat() / audioData.size) * width
-                val y = centerY + (audioData[i].toFloat() / maxAmplitude) * centerY * animatedIntensity * 2.5f
-                points.add(x to y)
+                if (count >= 60) break
+                pointsX[count] = (i.toFloat() / audioData.size) * width
+                pointsY[count] = centerY + (audioData[i].toFloat() / maxAmplitude) * centerY * animatedIntensity * 3f
+                count++
             }
 
-            for (i in 0 until points.size - 1) {
-                val p1 = points[i]
-                val p2 = points[i + 1]
-                val midX = (p1.first + p2.first) / 2f
-                val midY = (p1.second + p2.second) / 2f
+            for (i in 0 until count - 1) {
+                val p1x = pointsX[i]
+                val p1y = pointsY[i]
+                val p2x = pointsX[i + 1]
+                val p2y = pointsY[i + 1]
+                
+                val midX = (p1x + p2x) / 2f
+                val midY = (p1y + p2y) / 2f
                 
                 if (i == 0) {
-                    path.lineTo(p1.first, p1.second)
+                    path.lineTo(p1x, p1y)
                 } else {
-                    path.quadraticTo(p1.first, p1.second, midX, midY)
+                    path.quadraticTo(p1x, p1y, midX, midY)
                 }
             }
-            
-            if (points.isNotEmpty()) {
-                path.lineTo(width, centerY)
-            }
+            path.lineTo(width, centerY)
         } else {
             path.lineTo(width, centerY)
         }
