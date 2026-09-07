@@ -8,14 +8,15 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
- * Manages audio recording and emits raw PCM data with throttling to prevent UI saturation.
+ * Thread-safe manager for audio recording with lifecycle-aware cleanup.
  */
 class AudioRecorderManager {
 
@@ -23,7 +24,7 @@ class AudioRecorderManager {
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
     private val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-    private val circularBufferSize = sampleRate * 1 // 1 second buffer
+    private val circularBufferSize = sampleRate * 1 
 
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
@@ -32,6 +33,7 @@ class AudioRecorderManager {
 
     private val circularBuffer = ShortArray(circularBufferSize)
     private var writePos = 0
+    private val bufferMutex = Mutex()
 
     @SuppressLint("MissingPermission")
     fun startRecording(scope: CoroutineScope) {
@@ -47,12 +49,11 @@ class AudioRecorderManager {
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e("TapTect", "AudioRecord failed to initialize")
+                Log.e("TapTect", "AudioRecord initialization failed")
                 return
             }
 
             audioRecord?.startRecording()
-            Log.d("TapTect", "Audio recording started")
 
             recordingJob = scope.launch(Dispatchers.IO) {
                 val readBuffer = ShortArray(bufferSize / 2)
@@ -62,15 +63,15 @@ class AudioRecorderManager {
                 while (isActive && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     val readSize = audioRecord?.read(readBuffer, 0, readBuffer.size) ?: 0
                     if (readSize > 0) {
-                        // Update circular buffer
-                        for (i in 0 until readSize) {
-                            val sample = readBuffer[i]
-                            circularBuffer[writePos] = sample
-                            writePos = (writePos + 1) % circularBufferSize
-                            emissionBuffer.add(sample)
+                        bufferMutex.withLock {
+                            for (i in 0 until readSize) {
+                                val sample = readBuffer[i]
+                                circularBuffer[writePos] = sample
+                                writePos = (writePos + 1) % circularBufferSize
+                                emissionBuffer.add(sample)
+                            }
                         }
 
-                        // Throttle emissions to ~20Hz (every 50ms) to save UI thread
                         val currentTime = System.currentTimeMillis()
                         if (currentTime - lastEmitTime >= 50 && emissionBuffer.isNotEmpty()) {
                             _audioDataFlow.emit(emissionBuffer.toShortArray())
@@ -81,12 +82,11 @@ class AudioRecorderManager {
                 }
             }
         } catch (e: Exception) {
-            Log.e("TapTect", "Error starting audio recording", e)
+            Log.e("TapTect", "Audio start error", e)
         }
     }
 
     fun stopRecording() {
-        Log.d("TapTect", "Stopping audio recording")
         recordingJob?.cancel()
         recordingJob = null
         try {
@@ -97,12 +97,15 @@ class AudioRecorderManager {
                 release()
             }
         } catch (e: Exception) {
-            Log.e("TapTect", "Error stopping audio recording", e)
+            Log.e("TapTect", "Audio stop error", e)
         }
         audioRecord = null
     }
 
-    fun captureBuffer(durationMs: Int): ShortArray {
+    /**
+     * Captures samples from circular buffer. Thread-safe.
+     */
+    suspend fun captureBuffer(durationMs: Int): ShortArray = bufferMutex.withLock {
         val size = (sampleRate * durationMs / 1000).coerceAtMost(circularBufferSize)
         val result = ShortArray(size)
         var readPos = (writePos - size + circularBufferSize) % circularBufferSize

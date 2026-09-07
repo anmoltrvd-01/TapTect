@@ -6,7 +6,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Lightweight FFT processor for spectral analysis.
+ * Optimized FFT processor with object pooling to minimize GC pressure during rapid taps.
  */
 class FFTProcessor {
 
@@ -16,23 +16,44 @@ class FFTProcessor {
         val energyDecay: Float
     )
 
+    // Object pooling for FFT arrays
+    private var cachedN = 0
+    private var realArray: FloatArray? = null
+    private var imagArray: FloatArray? = null
+    private var bitReversedIndices: IntArray? = null
+
     /**
      * Performs FFT on the given PCM data and returns spectral analysis.
-     * @param pcm Data should be a power of 2 in length.
-     * @param sampleRate The sampling rate of the audio.
+     * Off-load this to Dispatchers.Default.
      */
     fun analyze(pcm: ShortArray, sampleRate: Int): AnalysisResult {
         val n = nextPowerOfTwo(pcm.size)
-        val real = FloatArray(n)
-        val imag = FloatArray(n)
-
-        // Fill real part with PCM data and apply Hanning window
-        for (i in pcm.indices) {
-            val window = 0.5f * (1f - cos(2f * PI.toFloat() * i / (pcm.size - 1)))
-            real[i] = pcm[i].toFloat() * window
+        
+        // Re-allocate pools only if size changes
+        if (n != cachedN) {
+            realArray = FloatArray(n)
+            imagArray = FloatArray(n)
+            bitReversedIndices = calculateBitReversedIndices(n)
+            cachedN = n
         }
 
-        fft(real, imag)
+        val real = realArray!!
+        val imag = imagArray!!
+        val indices = bitReversedIndices!!
+
+        // Clear and apply window function
+        for (i in 0 until n) {
+            if (i < pcm.size) {
+                // Hanning window to reduce spectral leakage
+                val window = 0.5f * (1f - cos(2f * PI.toFloat() * i / (pcm.size - 1)))
+                real[i] = pcm[i].toFloat() * window
+            } else {
+                real[i] = 0f
+            }
+            imag[i] = 0f
+        }
+
+        fft(real, imag, indices)
 
         val magnitudes = FloatArray(n / 2)
         var maxMag = -1f
@@ -48,41 +69,27 @@ class FFTProcessor {
 
         val peakFreq = maxIndex.toFloat() * sampleRate / n
         
-        // Simple energy decay estimation (RMS of first half vs second half)
-        val firstHalf = pcm.sliceArray(0 until pcm.size / 2)
-        val secondHalf = pcm.sliceArray(pcm.size / 2 until pcm.size)
-        val rms1 = calculateRMS(firstHalf)
-        val rms2 = calculateRMS(secondHalf)
-        val decay = if (rms1 > 0) rms2 / rms1 else 0f
+        // Energy decay estimation
+        val firstHalfRms = calculateRMS(pcm.sliceArray(0 until pcm.size / 2))
+        val secondHalfRms = calculateRMS(pcm.sliceArray(pcm.size / 2 until pcm.size))
+        val decay = if (firstHalfRms > 0) secondHalfRms / firstHalfRms else 0f
 
         return AnalysisResult(peakFreq, magnitudes, decay)
     }
 
-    private fun fft(real: FloatArray, imag: FloatArray) {
+    private fun fft(real: FloatArray, imag: FloatArray, indices: IntArray) {
         val n = real.size
-        if (n <= 1) return
-
-        val bitReversedIndices = IntArray(n)
+        
+        // Bit-reversal permutation
         for (i in 0 until n) {
-            var j = 0
-            var tempI = i
-            var tempN = n
-            while (tempN > 1) {
-                j = (j shl 1) or (tempI and 1)
-                tempI = tempI shr 1
-                tempN = tempN shr 1
-            }
-            bitReversedIndices[i] = j
-        }
-
-        for (i in 0 until n) {
-            val j = bitReversedIndices[i]
+            val j = indices[i]
             if (i < j) {
                 val tempR = real[i]; real[i] = real[j]; real[j] = tempR
                 val tempI = imag[i]; imag[i] = imag[j]; imag[j] = tempI
             }
         }
 
+        // Cooley-Tukey Radix-2 iterative FFT
         var length = 2
         while (length <= n) {
             val angle = -2f * PI.toFloat() / length
@@ -94,12 +101,15 @@ class FFTProcessor {
                 for (j in 0 until length / 2) {
                     val uR = real[i + j]
                     val uI = imag[i + j]
-                    val vR = real[i + j + length / 2] * wR - imag[i + j + length / 2] * wI
-                    val vI = real[i + j + length / 2] * wI + imag[i + j + length / 2] * wR
+                    val vIdx = i + j + length / 2
+                    val vR = real[vIdx] * wR - imag[vIdx] * wI
+                    val vI = real[vIdx] * wI + imag[vIdx] * wR
+                    
                     real[i + j] = uR + vR
                     imag[i + j] = uI + vI
-                    real[i + j + length / 2] = uR - vR
-                    imag[i + j + length / 2] = uI - vI
+                    real[vIdx] = uR - vR
+                    imag[vIdx] = uI - vI
+                    
                     val nextWR = wR * wLenR - wI * wLenI
                     wI = wR * wLenI + wI * wLenR
                     wR = nextWR
@@ -107,6 +117,22 @@ class FFTProcessor {
             }
             length *= 2
         }
+    }
+
+    private fun calculateBitReversedIndices(n: Int): IntArray {
+        val indices = IntArray(n)
+        for (i in 0 until n) {
+            var j = 0
+            var tempI = i
+            var tempN = n
+            while (tempN > 1) {
+                j = (j shl 1) or (tempI and 1)
+                tempI = tempI shr 1
+                tempN = tempN shr 1
+            }
+            indices[i] = j
+        }
+        return indices
     }
 
     private fun nextPowerOfTwo(n: Int): Int {
@@ -118,7 +144,7 @@ class FFTProcessor {
     private fun calculateRMS(data: ShortArray): Float {
         if (data.isEmpty()) return 0f
         var sum = 0.0
-        for (s in data) sum += s.toInt() * s.toInt()
+        for (s in data) sum += (s.toInt() * s.toInt()).toDouble()
         return sqrt(sum / data.size).toFloat()
     }
 }

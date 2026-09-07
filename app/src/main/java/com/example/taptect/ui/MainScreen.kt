@@ -17,8 +17,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.taptect.audio.*
 import com.example.taptect.data.CalibrationRepository
@@ -35,6 +38,7 @@ fun MainScreen(
     historyViewModel: HistoryViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     
     val audioRecorderManager = remember { AudioRecorderManager() }
@@ -77,6 +81,70 @@ fun MainScreen(
         }
     }
 
+    // Lifecycle-aware recording and sensor management
+    DisposableEffect(hasPermissions, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    if (hasPermissions && !isCalibrating) {
+                        audioRecorderManager.startRecording(scope)
+                    }
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    audioRecorderManager.stopRecording()
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        if (hasPermissions) {
+            tapSensorManager.startListening { magnitude ->
+                scope.launch {
+                    val buffer = audioRecorderManager.captureBuffer(256)
+                    val rms = calculateRMS(buffer)
+                    
+                    if (rms > audioThreshold) {
+                        hapticFeedback.triggerClick()
+                        isProcessing = true
+                        
+                        // Process in background
+                        val result = withContext(Dispatchers.Default) {
+                            val filtered = noiseFilter.process(buffer)
+                            fftProcessor.analyze(filtered, 44100)
+                        }
+                        
+                        analysisResult = result
+                        val finalResult = repository.classifyTap(result.peakFrequency, result.energyDecay)
+                        surfaceResult = finalResult
+                        
+                        // DB write on IO
+                        withContext(Dispatchers.IO) {
+                            historyViewModel.insert(
+                                TapRecord(
+                                    timestamp = System.currentTimeMillis(),
+                                    materialType = finalResult.material.materialName,
+                                    peakFrequency = result.peakFrequency,
+                                    decayRate = result.energyDecay,
+                                    densityScore = finalResult.material.densityScore
+                                )
+                            )
+                        }
+
+                        hapticFeedback.triggerSuccess()
+                        isProcessing = false
+                    }
+                }
+            }
+        }
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            audioRecorderManager.stopRecording()
+            tapSensorManager.stopListening()
+        }
+    }
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -91,46 +159,6 @@ fun MainScreen(
             if (isCalibrating) {
                 CalibrationLoadingView()
             } else if (hasPermissions) {
-                DisposableEffect(Unit) {
-                    tapSensorManager.startListening { magnitude ->
-                        scope.launch {
-                            val buffer = audioRecorderManager.captureBuffer(256)
-                            val rms = calculateRMS(buffer)
-                            
-                            // DUAL TRIGGER: Accelerometer magnitude AND Audio amplitude
-                            if (rms > audioThreshold) {
-                                hapticFeedback.triggerClick()
-                                isProcessing = true
-                                val result = withContext(Dispatchers.Default) {
-                                    val filtered = noiseFilter.process(buffer)
-                                    fftProcessor.analyze(filtered, 44100)
-                                }
-                                analysisResult = result
-                                val finalResult = repository.classifyTap(result.peakFrequency, result.energyDecay)
-                                surfaceResult = finalResult
-                                
-                                // Save to database
-                                historyViewModel.insert(
-                                    TapRecord(
-                                        timestamp = System.currentTimeMillis(),
-                                        materialType = finalResult.material.materialName,
-                                        peakFrequency = result.peakFrequency,
-                                        decayRate = result.energyDecay,
-                                        densityScore = finalResult.material.densityScore
-                                    )
-                                )
-
-                                hapticFeedback.triggerSuccess()
-                                isProcessing = false
-                            }
-                        }
-                    }
-                    onDispose {
-                        audioRecorderManager.stopRecording()
-                        tapSensorManager.stopListening()
-                    }
-                }
-
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()

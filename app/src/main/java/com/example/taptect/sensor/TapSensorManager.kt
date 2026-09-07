@@ -5,13 +5,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlin.math.sqrt
 
 /**
- * Enhanced SensorManager with dual-trigger logic and cooldown periods.
+ * SensorManager wrapper with physical impact detection logic.
  */
 class TapSensorManager(context: Context) : SensorEventListener {
 
@@ -22,7 +19,7 @@ class TapSensorManager(context: Context) : SensorEventListener {
     
     private var lastTriggerTime = 0L
     private val cooldownMs = 300L
-    private var gForceThreshold = 18f // Adjustable threshold
+    private var gForceThreshold = 18f 
 
     fun startListening(onImpact: (Float) -> Unit) {
         onImpactDetected = onImpact
@@ -41,12 +38,12 @@ class TapSensorManager(context: Context) : SensorEventListener {
             val now = System.currentTimeMillis()
             if (now - lastTriggerTime < cooldownMs) return
 
-            val z = event.values[2] // Focus on Z-axis for physical impacts
             val x = event.values[0]
             val y = event.values[1]
+            val z = event.values[2]
             val magnitude = sqrt(x * x + y * y + z * z)
 
-            // Sharp Z-axis movement often indicates a surface tap
+            // Focus on sudden impacts (high G-force)
             if (magnitude > gForceThreshold) {
                 lastTriggerTime = now
                 onImpactDetected?.invoke(magnitude)
@@ -55,20 +52,4 @@ class TapSensorManager(context: Context) : SensorEventListener {
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-
-    fun getAccelerometerFlow(): Flow<Float> = callbackFlow {
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent?) {
-                if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
-                    val x = event.values[0]
-                    val y = event.values[1]
-                    val z = event.values[2]
-                    trySend(sqrt(x * x + y * y + z * z))
-                }
-            }
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-        accelerometer?.let { sensorManager.registerListener(listener, it, SensorManager.SENSOR_DELAY_FASTEST) }
-        awaitClose { sensorManager.unregisterListener(listener) }
-    }
 }
